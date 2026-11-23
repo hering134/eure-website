@@ -336,26 +336,50 @@
         document.getElementById('master-pin-input').addEventListener('keyup', e => { if (e.key === 'Enter') pruefeMasterPin(); });
         let myChatId = localStorage.getItem('simmerathChatId') || Math.floor(1000 + Math.random() * 9000).toString();
         localStorage.setItem('simmerathChatId', myChatId);
-        document.getElementById('my-chat-id').innerText = myChatId;
+        document.getElementById('my-chat-id').innerText = myChatId + " (Verbinde...)";
 
         let chatData = JSON.parse(localStorage.getItem('simmerathChatData') || '{"contacts":{},"messages":{}}');
-        let activeContactId = null, chatPeer = null, activeConn = null;
+        let activeContactId = null, chatPeer = null, openConns = {};
 
-        function initChatPeer() {
-            if (chatPeer || typeof Peer === 'undefined') return;
-            chatPeer = new Peer('simmerath-chat-' + myChatId);
+        function startChatNetwork() {
+            if (chatPeer) return;
+            if (typeof Peer === 'undefined') { setTimeout(startChatNetwork, 500); return; }
+            chatPeer = new Peer('simmerath-v2-' + myChatId);
+            chatPeer.on('open', () => {
+                document.getElementById('my-chat-id').innerText = myChatId + " 🟢";
+            });
             chatPeer.on('connection', conn => {
-                const remoteId = conn.peer.replace('simmerath-chat-', '');
-                if (!chatData.contacts[remoteId]) { chatData.contacts[remoteId] = "Unbekannt (" + remoteId + ")"; saveChatData(); renderContacts(); }
-                conn.on('data', data => { if (data.type === 'msg') appendMsg(remoteId, chatData.contacts[remoteId], data.text); });
+                registerConn(conn);
             });
         }
-        initChatPeer();
+        startChatNetwork();
+
+        function registerConn(conn) {
+            const remoteId = conn.peer.replace('simmerath-v2-', '');
+            openConns[remoteId] = conn;
+            if (!chatData.contacts[remoteId]) {
+                chatData.contacts[remoteId] = "Freund #" + remoteId;
+                saveChatData(); renderContacts();
+            }
+            conn.on('open', () => {
+                if (activeContactId === remoteId) document.getElementById('chat-conn-status').innerText = "🟢 Verbunden!";
+            });
+            conn.on('data', data => {
+                if (data.type === 'msg') {
+                    appendMsg(remoteId, chatData.contacts[remoteId], data.text);
+                    if (!activeContactId) selectContact(remoteId);
+                }
+            });
+            conn.on('close', () => {
+                delete openConns[remoteId];
+                if (activeContactId === remoteId) document.getElementById('chat-conn-status').innerText = "🔴 Getrennt";
+            });
+        }
 
         function saveChatData() { localStorage.setItem('simmerathChatData', JSON.stringify(chatData)); }
         function addChatContact() {
             const id = document.getElementById('new-contact-id').value.trim();
-            const name = document.getElementById('new-contact-name').value.trim() || ("User " + id);
+            const name = document.getElementById('new-contact-name').value.trim() || ("User #" + id);
             if (!id) return;
             chatData.contacts[id] = name; if (!chatData.messages[id]) chatData.messages[id] = [];
             saveChatData(); document.getElementById('new-contact-id').value = ""; document.getElementById('new-contact-name').value = "";
@@ -376,13 +400,14 @@
             activeContactId = id; renderContacts();
             document.getElementById('active-chat-area').style.display = 'block';
             document.getElementById('current-chat-title').innerText = `${chatData.contacts[id]} (#${id})`;
-            document.getElementById('chat-conn-status').innerText = "Verbinde...";
             renderMessages();
-            if (activeConn) activeConn.close();
-            if (chatPeer) {
-                activeConn = chatPeer.connect('simmerath-chat-' + id);
-                activeConn.on('open', () => { document.getElementById('chat-conn-status').innerText = "🟢 Online"; });
-                activeConn.on('error', () => { document.getElementById('chat-conn-status').innerText = "🟡 Offline"; });
+
+            if (openConns[id] && openConns[id].open) {
+                document.getElementById('chat-conn-status').innerText = "🟢 Verbunden!";
+            } else if (chatPeer && chatPeer.open) {
+                document.getElementById('chat-conn-status').innerText = "🟡 Wähle an...";
+                const conn = chatPeer.connect('simmerath-v2-' + id, { reliable: true });
+                registerConn(conn);
             }
         }
         function renameActiveContact() {
@@ -403,8 +428,18 @@
         }
         function sendChatMsg() {
             const inp = document.getElementById('chat-msg-input'), txt = inp.value.trim();
-            if (!txt || !activeContactId) return; inp.value = ""; appendMsg(activeContactId, "ICH", txt);
-            if (activeConn && activeConn.open) activeConn.send({ type: 'msg', text: txt });
+            if (!txt || !activeContactId) return;
+            inp.value = "";
+            appendMsg(activeContactId, "ICH", txt);
+
+            const targetId = activeContactId;
+            if (openConns[targetId] && openConns[targetId].open) {
+                openConns[targetId].send({ type: 'msg', text: txt });
+            } else if (chatPeer) {
+                const conn = chatPeer.connect('simmerath-v2-' + targetId, { reliable: true });
+                registerConn(conn);
+                conn.on('open', () => conn.send({ type: 'msg', text: txt }));
+            }
         }
         document.getElementById('chat-msg-input').addEventListener('keyup', e => { if (e.key === 'Enter') sendChatMsg(); });
 
@@ -416,6 +451,31 @@
                 saveChatData(); renderContacts(); if (activeContactId) renderMessages(); alert("✅ Chat wiederhergestellt!");
             } catch (e) { alert("⛔ Ungültiger Backup-Code!"); }
         }
+        // --- AUTOMATISCHE & MANUELLE LIVE-EVENTS ---
+        function starteLiveEvent(titelText) {
+            let banner = document.getElementById('live-event-banner');
+            if (!banner) {
+                banner = document.createElement('div');
+                banner.id = 'live-event-banner';
+                banner.style.cssText = "background: linear-gradient(90deg, #d4af37, #ffdf73, #d4af37); color: #5e1621; text-align: center; padding: 16px; font-weight: bold; font-size: 22px; border-bottom: 4px solid #8b2635; box-shadow: 0 4px 15px rgba(0,0,0,0.2);";
+                document.body.insertBefore(banner, document.getElementById('countdown-bar'));
+            }
+            banner.innerHTML = "✨ LIVE-EVENT: " + titelText + " ✨";
+            initSnow(180);
+            spieleJingleBells();
+        }
+
+        // Prüft automatisch auf Adventssonntage 2026, Nikolaus & Heiligabend
+        (function checkAutoLiveEvent() {
+            const heute = new Date();
+            const m = heute.getMonth() + 1, d = heute.getDate();
+            if (m === 11 && d === 29) starteLiveEvent("Heute ist der 1. Advent! Zündet die erste Kerze an! 🕯️");
+            if (m === 12 && d === 6) starteLiveEvent("Heute ist Nikolaus-Tag! Schaut in eure Stiefel! 🎅");
+            if (m === 12 && d === 13) starteLiveEvent("Heute ist der 3. Advent in Simmerath! 🕯️🕯️🕯️");
+            if (m === 12 && d === 20) starteLiveEvent("Heute ist der 4. Advent! Bald ist Weihnachten! 🕯️🕯️🕯️🕯️");
+            if (m === 12 && d === 24) starteLiveEvent("FROHE WEIHNACHTEN, OMA MARITA & OPA LUDWIG! 🎄🎁❤️");
+        })();
+
         let matrixInterval;
         function startMatrix() {
             const mc = document.getElementById('matrix-bg'), mctx = mc.getContext('2d');
@@ -429,7 +489,7 @@
             }, 50);
         }
 
-        function oeffneTerminal() { document.getElementById('god-terminal').style.display = 'block'; document.getElementById('live-code-editor').value = document.documentElement.outerHTML; startMatrix(); }
+        function oeffneTerminal() { document.getElementById('god-terminal').style.display = 'block'; document.getElementById('live-code-editor').value = document.documentElement.outerHTML; startMatrix(); startChatNetwork(); }
         function schliesseTerminal() { document.getElementById('god-terminal').style.display = 'none'; clearInterval(matrixInterval); }
         function zeigeGodTab(id) { ['tab-chat', 'tab-console', 'tab-editor', 'tab-invaders', 'tab-snake', 'tab-hack', 'tab-reaktion'].forEach(t => document.getElementById(t).style.display = (t === id) ? 'block' : 'none'); }
 
@@ -437,7 +497,8 @@
             const inp = document.getElementById('console-input'), out = document.getElementById('console-output'), cmd = inp.value.trim().toLowerCase();
             inp.value = ""; if (!cmd) return;
             out.innerHTML += `<div>root@simmerath:~# ${cmd}</div>`;
-            if (cmd === "help") out.innerHTML += `<div style="color:#aaffaa;">Befehle: help, snow, party, jingle, unlock, clear</div>`;
+            if (cmd === "help") out.innerHTML += `<div style="color:#aaffaa;">Befehle: help, event, snow, party, jingle, unlock, clear</div>`;
+            else if (cmd === "event") { starteLiveEvent("SONDER-FESTIVAL IN SIMMERATH GESTARTET! 🎉"); out.innerHTML += `<div>🎆 Live-Event wurde auf der Startseite gezündet!</div>`; }
             else if (cmd === "snow") { initSnow(250); out.innerHTML += `<div>❄️ Schneesturm gestartet!</div>`; }
             else if (cmd === "party") { document.body.style.background = 'linear-gradient(45deg, #ffcccc, #ccffcc, #ccccff)'; out.innerHTML += `<div>🌈 Party-Farben aktiviert!</div>`; }
             else if (cmd === "jingle") { spieleJingleBells(); out.innerHTML += `<div>🎵 Spiele Jingle Bells...</div>`; }
